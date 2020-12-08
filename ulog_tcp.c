@@ -133,9 +133,6 @@ static void _ulog_tcp_deinit(struct ulog_backend *backend) {
 static int ulog_tcp_connect(ulog_tcp_t *utcp) {
     struct sockaddr_in server_addr;
     unsigned long ul = 1;
-    utcp->timeout =
-        rt_tick_get() + rt_tick_from_millisecond(ULOG_TCP_CONN_RETRY_TIMEOUT);
-
     if (utcp->socket <= 0) {
         utcp->socket = socket(AF_INET, SOCK_STREAM, 0);
         if (utcp->socket <= 0) goto err;
@@ -161,6 +158,8 @@ static int ulog_tcp_connect(ulog_tcp_t *utcp) {
     return 0;
 err:
     ulog_tcp_close_one_connection(utcp, FALSE);
+    utcp->timeout =
+        rt_tick_get() + rt_tick_from_millisecond(ULOG_TCP_CONN_RETRY_TIMEOUT);
     return -1;
 }
 
