@@ -232,7 +232,7 @@ void _ulog_tcp_init(struct ulog_backend *backend) {
             return;
         }
     }
-    tid = rt_thread_create("ulog_tcp", ulog_tcp_thread, NULL, 1024, 10, 5);
+    tid = rt_thread_create("ulog_tcp", ulog_tcp_thread, NULL, 2048, 10, 5);
     if (tid) {
         if (rt_thread_startup(tid) == RT_EOK) {
             return;
