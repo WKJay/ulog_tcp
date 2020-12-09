@@ -5,5 +5,5 @@
 
 #define ULOG_TCP_SELECT_TIMEOUT   1000
 #define ULOG_TCP_MAX_SERVER_COUNT 3
-
+#define ULOG_TCP_MUTEX_TIMEOUT    5000
 #endif /* __ULOG_CFG_H */

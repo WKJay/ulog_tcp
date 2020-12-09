@@ -19,4 +19,5 @@ uint16_t port = 3333;
 int ulog_tcp_app_init(void) {
     wait_for_internet_up();
     ulog_tcp_add_server(ip, port);
+	  return 0;
 }
