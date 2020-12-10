@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <rthw.h>
 
 #ifdef SAL_USING_POSIX
 #include <sys/select.h>
@@ -54,8 +55,10 @@ static int ulog_tcp_close_one_connection(ulog_tcp_t *conn, uint8_t del) {
             ulog_tcp_list = conn->next;
         else {
             for (iter = ulog_tcp_list; iter; iter = iter->next) {
-                if (iter->next == conn) iter->next = conn->next;
-                break;
+                if (iter->next == conn) {
+                    iter->next = conn->next;
+                    break;
+                }
             }
         }
     }
@@ -67,6 +70,9 @@ static int ulog_tcp_close_one_connection(ulog_tcp_t *conn, uint8_t del) {
 
     if (del) {
         rt_free(conn);
+    } else {
+        conn->timeout = rt_tick_get() +
+                        rt_tick_from_millisecond(ULOG_TCP_CONN_RETRY_TIMEOUT);
     }
 
     return 0;
@@ -97,6 +103,8 @@ static void ulog_tcp_list_handle_fds(fd_set *readset) {
 
     for (utcp = ulog_tcp_list; utcp; utcp = next) {
         next = utcp->next;
+        if (utcp->socket < 0) continue;
+
         if (FD_ISSET(utcp->socket, readset)) {
             while (1) {
                 int ret = recv(utcp->socket, &data, 1, 0);
@@ -108,8 +116,8 @@ static void ulog_tcp_list_handle_fds(fd_set *readset) {
                     break;
                 } else if (ret < 0) {
                     if (errno != EWOULDBLOCK) {
-                        rt_kprintf("ulog tcp connection %d error,now close\r\n",
-                                   utcp->socket);
+                        // rt_kprintf("ulog tcp connection %d error,now close\r\n",
+                        //            utcp->socket);
                         ulog_tcp_close_one_connection(utcp, FALSE);
                         break;
                     } else {
@@ -134,13 +142,7 @@ static void _ulog_tcp_output(struct ulog_backend *backend, rt_uint32_t level,
 }
 
 static void _ulog_tcp_deinit(struct ulog_backend *backend) {
-    if (ulog_tcp_list) {
-        ulog_tcp_close_all_connection(TRUE);
-    }
-    if (ulog_tcp_mutex) {
-        rt_mutex_release(ulog_tcp_mutex);
-        ulog_tcp_mutex = NULL;
-    }
+    ulog_tcp_shutdown = 1;
 }
 
 static int ulog_tcp_connect(ulog_tcp_t *utcp) {
@@ -156,19 +158,21 @@ static int ulog_tcp_connect(ulog_tcp_t *utcp) {
     server_addr.sin_addr.s_addr =
         PP_HTONL(MAKEU32(utcp->ip[0], utcp->ip[1], utcp->ip[2], utcp->ip[3]));
     server_addr.sin_port = htons(utcp->port);
-    if (connect(utcp->socket, (struct sockaddr *)&server_addr,
-                sizeof(struct sockaddr)) < 0) {
-        rt_kprintf("ulog tcp connect failed.\r\n");
-        goto err;
-    }
 
     if (ioctlsocket(utcp->socket, FIONBIO, (unsigned long *)&ul) < 0) {
         rt_kprintf("ulog tcp set non-block failed.\r\n");
         goto err;
     }
 
-    rt_kprintf("ulog tcp connected to %d.%d.%d.%d:%d\r\n", utcp->ip[0],
-               utcp->ip[1], utcp->ip[2], utcp->ip[3], utcp->port);
+    // rt_kprintf("ulog tcp connect %d\r\n", utcp->socket);
+
+    if (connect(utcp->socket, (struct sockaddr *)&server_addr,
+                sizeof(struct sockaddr)) < 0) {
+        if (errno != EINPROGRESS) {
+            rt_kprintf("ulog tcp connect failed.\r\n");
+            goto err;
+        }
+    }
 
     return 0;
 err:
@@ -198,6 +202,7 @@ void ulog_tcp_thread(void *param) {
     /* set ulog tcp select timeout */
     timeout.tv_sec = ULOG_TCP_SELECT_TIMEOUT / 1000;
     timeout.tv_usec = (ULOG_TCP_SELECT_TIMEOUT % 1000) * 1000;
+    ulog_tcp_shutdown = 0;
 
     for (;;) {
         if (ulog_tcp_shutdown) {
@@ -219,6 +224,14 @@ void ulog_tcp_thread(void *param) {
         rt_mutex_release(ulog_tcp_mutex);
     }
 shutdown:
+    if (ulog_tcp_list) {
+        ulog_tcp_close_all_connection(TRUE);
+    }
+    if (ulog_tcp_mutex) {
+        rt_mutex_take(ulog_tcp_mutex, RT_WAITING_FOREVER);
+        rt_mutex_release(ulog_tcp_mutex);
+        ulog_tcp_mutex = NULL;
+    }
     // exit thread
     return;
 }
@@ -248,11 +261,17 @@ void _ulog_tcp_init(struct ulog_backend *backend) {
 }
 
 int ulog_tcp_add_server(uint8_t *ip, uint16_t port) {
-    int server_cnt = 0;
+    int server_cnt = 0, ret;
     ulog_tcp_t *cur;
+
+    if (ulog_tcp_shutdown == 1) {
+        rt_kprintf("ulog tcp backend has been shut down.\r\n");
+        return -1;
+    }
 
     if (rt_mutex_take(ulog_tcp_mutex, ULOG_TCP_MUTEX_TIMEOUT) != RT_EOK) {
         rt_kprintf("take ulog tcp mutex failed.\r\n");
+
         return -1;
     }
 
@@ -261,17 +280,20 @@ int ulog_tcp_add_server(uint8_t *ip, uint16_t port) {
         if (rt_memcmp(cur->ip, ip, 4) == 0 && cur->port == port) {
             rt_kprintf("ulog tcp server %d.%d.%d.%d:%d already added.", ip[0],
                        ip[1], ip[2], ip[3], port);
-            goto err;
+            ret = -1;
+            goto end;
         }
     }
     if (server_cnt > ULOG_TCP_MAX_SERVER_COUNT) {
         rt_kprintf("no enough tcp server space.\r\n");
-        goto err;
+        ret = -1;
+        goto end;
     }
     cur = (ulog_tcp_t *)rt_malloc((sizeof(ulog_tcp_t)));
     if (cur == NULL) {
         rt_kprintf("cannot allocate ulog_tcp_t memory.\r\n");
-        goto err;
+        ret = -1;
+        goto end;
     }
     rt_memset(cur, 0, sizeof(ulog_tcp_t));
     rt_memcpy(cur->ip, ip, 4);
@@ -287,15 +309,23 @@ int ulog_tcp_add_server(uint8_t *ip, uint16_t port) {
     /* do connection */
     ulog_tcp_connect(cur);
 
+    ret = 0;
+    goto end;
+end:
+
     rt_mutex_release(ulog_tcp_mutex);
-    return 0;
-err:
-    rt_mutex_release(ulog_tcp_mutex);
-    return -1;
+
+    return ret;
 }
 
 int ulog_tcp_delete_server(uint8_t *ip, uint16_t port) {
     ulog_tcp_t *iter = NULL;
+    int ret;
+    if (ulog_tcp_shutdown == 1) {
+        rt_kprintf("ulog tcp backend has been shut down.\r\n");
+        return -1;
+    }
+
     if (rt_mutex_take(ulog_tcp_mutex, ULOG_TCP_MUTEX_TIMEOUT) != RT_EOK) {
         rt_kprintf("take ulog tcp mutex failed.\r\n");
         return -1;
@@ -304,13 +334,16 @@ int ulog_tcp_delete_server(uint8_t *ip, uint16_t port) {
     for (iter = ulog_tcp_list; iter; iter = iter->next) {
         if ((rt_memcmp(iter->ip, ip, 4) == 0) && (iter->port == port)) {
             ulog_tcp_close_one_connection(iter, TRUE);
-            rt_mutex_release(ulog_tcp_mutex);
-            return 0;
+            ret = 0;
+            goto end;
         }
     }
     /* not found */
+    ret = -1;
+end:
     rt_mutex_release(ulog_tcp_mutex);
-    return -1;
+
+    return ret;
 }
 
 int ulog_tcp_init(void) {
