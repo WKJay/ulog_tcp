@@ -116,7 +116,8 @@ static void ulog_tcp_list_handle_fds(fd_set *readset) {
                     break;
                 } else if (ret < 0) {
                     if (errno != EWOULDBLOCK) {
-                        // rt_kprintf("ulog tcp connection %d error,now close\r\n",
+                        // rt_kprintf("ulog tcp connection %d error,now
+                        // close\r\n",
                         //            utcp->socket);
                         ulog_tcp_close_one_connection(utcp, FALSE);
                         break;
@@ -357,40 +358,68 @@ int ulog_tcp_init(void) {
 INIT_PREV_EXPORT(ulog_tcp_init);
 
 /* MSH CMD */
-void test_log(void) {
+void ulog_tcp_testlog(void) {
     LOG_E("TEST_E");
     LOG_I("TEST_I");
     LOG_D("TEST_D");
     LOG_W("TEST_W");
 }
-MSH_CMD_EXPORT(test_log, test log function);
+MSH_CMD_EXPORT(ulog_tcp_testlog, test log function);
 
+static void print_server_list(void) {
+    ulog_tcp_t *iter = NULL;
+    int index = 0;
+    rt_mutex_take(ulog_tcp_mutex, ULOG_TCP_MUTEX_TIMEOUT);
+
+    if (ulog_tcp_list == NULL) {
+        rt_kprintf("no active log server connected.\r\n");
+    } else {
+        rt_kprintf("index ip:port\r\n");
+        for (iter = ulog_tcp_list; iter; iter = iter->next) {
+            index++;
+            rt_kprintf("%5d %d.%d.%d.%d:%d\r\n", index, iter->ip[0],
+                       iter->ip[1], iter->ip[2], iter->ip[3], iter->port);
+        }
+    }
+    rt_mutex_release(ulog_tcp_mutex);
+}
 void ulog_tcp(int argc, char **argv) {
     int ip[4], port;
     uint8_t ip_u8[4];
 
-    if (argc != 3) goto err_param;
-    if (argv[1][0] != 'a' && argv[1][0] != 'd') goto err_param;
-    if (sscanf(argv[2], "%d.%d.%d.%d:%d", &ip[0], &ip[1], &ip[2], &ip[3],
-               &port) != 5)
+    if (argc == 2) {
+        if (argv[1][0] == 'l') {
+            print_server_list();
+            return;
+        } else {
+            goto err_param;
+        }
+    } else if (argc == 3) {
+        if (argv[1][0] != 'a' && argv[1][0] != 'd') goto err_param;
+        if (sscanf(argv[2], "%d.%d.%d.%d:%d", &ip[0], &ip[1], &ip[2], &ip[3],
+                   &port) != 5)
+            goto err_param;
+
+        if ((ip[0] <= 0 || ip[0] > 255) || (ip[1] < 0 || ip[1] > 255) ||
+            (ip[2] < 0 || ip[2] > 255) || (ip[3] < 0 || ip[3] > 255) ||
+            (port < 0 || port > 65535))
+            goto err_param;
+
+        ip_u8[0] = ip[0];
+        ip_u8[1] = ip[1];
+        ip_u8[2] = ip[2];
+        ip_u8[3] = ip[3];
+
+        if (argv[1][0] == 'a')
+            ulog_tcp_add_server(ip_u8, port);
+        else if (argv[1][0] == 'd')
+            ulog_tcp_delete_server(ip_u8, port);
+
+        return;
+    } else {
         goto err_param;
+    }
 
-    if ((ip[0] <= 0 || ip[0] > 255) || (ip[1] < 0 || ip[1] > 255) ||
-        (ip[2] < 0 || ip[2] > 255) || (ip[3] < 0 || ip[3] > 255) ||
-        (port < 0 || port > 65535))
-        goto err_param;
-
-    ip_u8[0] = ip[0];
-    ip_u8[1] = ip[1];
-    ip_u8[2] = ip[2];
-    ip_u8[3] = ip[3];
-
-    if (argv[1][0] == 'a')
-        ulog_tcp_add_server(ip_u8, port);
-    else if (argv[1][0] == 'd')
-        ulog_tcp_delete_server(ip_u8, port);
-
-    return;
 err_param:
     rt_kprintf("bad parameter! input: ulog_tcp <a>/<d> <ip:port>\r\n");
 }
