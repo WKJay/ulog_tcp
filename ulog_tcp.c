@@ -219,6 +219,9 @@ void ulog_tcp_thread(void *param) {
         if (sockfd == 0) {
             rt_mutex_release(ulog_tcp_mutex);
             continue;
+        } else if (sockfd < 0) {
+            ulog_tcp_close_all_connection(FALSE);
+            rt_thread_mdelay(1000);
         }
 
         ulog_tcp_list_handle_fds(&readset);
